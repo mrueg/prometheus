@@ -16,8 +16,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"math"
 	"net/http"
 	"net/url"
@@ -69,6 +72,11 @@ func main() {
 	checkMetricsCmd := checkCmd.Command("metrics", checkMetricsUsage)
 
 	queryCmd := app.Command("query", "Run query against a Prometheus server.")
+
+	queryCmdTLSCaCertFile := queryCmd.Flag("cacert", "Path to CA Certificate File").String()
+	queryCmdTLSCertFile := queryCmd.Flag("cert", "Path to Client Certificate File").String()
+	queryCmdTLSKeyFile := queryCmd.Flag("key", "Path to Client Key File").String()
+
 	queryCmdFmt := queryCmd.Flag("format", "Output format of the query.").Short('o').Default("promql").Enum("promql", "json")
 
 	queryInstantCmd := queryCmd.Command("instant", "Run instant query.")
@@ -144,6 +152,39 @@ func main() {
 		p = &promqlPrinter{}
 	}
 
+	rt := api.DefaultRoundTripper
+
+	// Support for Server-side TLS and setup CA trustpath
+	if len(*queryCmdTLSCaCertFile) > 0 {
+
+		caCert, err := ioutil.ReadFile(*queryCmdTLSCaCertFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Unable to load CA Certificate file:", err)
+			os.Exit(1)
+		}
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
+		tlsConfig := &tls.Config{
+			RootCAs: caCertPool,
+		}
+
+		// Support for Client Certificates
+		if len(*queryCmdTLSKeyFile) > 0 || len(*queryCmdTLSCertFile) > 0 {
+			cert, err := tls.LoadX509KeyPair(*queryCmdTLSCertFile, *queryCmdTLSKeyFile)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Unable to load keypair:", err)
+				os.Exit(1)
+			}
+			tlsConfig = &tls.Config{
+				Certificates: []tls.Certificate{cert},
+				RootCAs:      caCertPool,
+			}
+
+		}
+
+		rt.(*http.Transport).TLSClientConfig = tlsConfig
+	}
+
 	switch parsedCmd {
 	case checkConfigCmd.FullCommand():
 		os.Exit(CheckConfig(*configFiles...))
@@ -155,13 +196,13 @@ func main() {
 		os.Exit(CheckMetrics())
 
 	case queryInstantCmd.FullCommand():
-		os.Exit(QueryInstant(*queryInstantServer, *queryInstantExpr, *queryInstantTime, p))
+		os.Exit(QueryInstant(*queryInstantServer, *queryInstantExpr, *queryInstantTime, p, rt))
 
 	case queryRangeCmd.FullCommand():
-		os.Exit(QueryRange(*queryRangeServer, *queryRangeHeaders, *queryRangeExpr, *queryRangeBegin, *queryRangeEnd, *queryRangeStep, p))
+		os.Exit(QueryRange(*queryRangeServer, *queryRangeHeaders, *queryRangeExpr, *queryRangeBegin, *queryRangeEnd, *queryRangeStep, p, rt))
 
 	case querySeriesCmd.FullCommand():
-		os.Exit(QuerySeries(*querySeriesServer, *querySeriesMatch, *querySeriesBegin, *querySeriesEnd, p))
+		os.Exit(QuerySeries(*querySeriesServer, *querySeriesMatch, *querySeriesBegin, *querySeriesEnd, p, rt))
 
 	case debugPprofCmd.FullCommand():
 		os.Exit(debugPprof(*debugPprofServer))
@@ -173,7 +214,7 @@ func main() {
 		os.Exit(debugAll(*debugAllServer))
 
 	case queryLabelsCmd.FullCommand():
-		os.Exit(QueryLabels(*queryLabelsServer, *queryLabelsName, *queryLabelsBegin, *queryLabelsEnd, p))
+		os.Exit(QueryLabels(*queryLabelsServer, *queryLabelsName, *queryLabelsBegin, *queryLabelsEnd, p, rt))
 
 	case testRulesCmd.FullCommand():
 		os.Exit(RulesUnitTest(*testRulesFiles...))
@@ -429,9 +470,10 @@ func CheckMetrics() int {
 }
 
 // QueryInstant performs an instant query against a Prometheus server.
-func QueryInstant(url, query, evalTime string, p printer) int {
+func QueryInstant(url, query, evalTime string, p printer, rt http.RoundTripper) int {
 	config := api.Config{
-		Address: url,
+		Address:      url,
+		RoundTripper: rt,
 	}
 
 	// Create new client.
@@ -467,9 +509,10 @@ func QueryInstant(url, query, evalTime string, p printer) int {
 }
 
 // QueryRange performs a range query against a Prometheus server.
-func QueryRange(url string, headers map[string]string, query, start, end string, step time.Duration, p printer) int {
+func QueryRange(url string, headers map[string]string, query, start, end string, step time.Duration, p printer, rt http.RoundTripper) int {
 	config := api.Config{
-		Address: url,
+		Address:      url,
+		RoundTripper: rt,
 	}
 
 	if len(headers) > 0 {
@@ -477,7 +520,7 @@ func QueryRange(url string, headers map[string]string, query, start, end string,
 			for key, value := range headers {
 				req.Header.Add(key, value)
 			}
-			return http.DefaultTransport.RoundTrip(req)
+			return rt.RoundTrip(req)
 		})
 	}
 
@@ -538,9 +581,10 @@ func QueryRange(url string, headers map[string]string, query, start, end string,
 }
 
 // QuerySeries queries for a series against a Prometheus server.
-func QuerySeries(url *url.URL, matchers []string, start, end string, p printer) int {
+func QuerySeries(url *url.URL, matchers []string, start, end string, p printer, rt http.RoundTripper) int {
 	config := api.Config{
-		Address: url.String(),
+		Address:      url.String(),
+		RoundTripper: rt,
 	}
 
 	// Create new client.
@@ -572,9 +616,10 @@ func QuerySeries(url *url.URL, matchers []string, start, end string, p printer) 
 }
 
 // QueryLabels queries for label values against a Prometheus server.
-func QueryLabels(url *url.URL, name string, start, end string, p printer) int {
+func QueryLabels(url *url.URL, name string, start, end string, p printer, r http.RoundTripper) int {
 	config := api.Config{
-		Address: url.String(),
+		Address:      url.String(),
+		RoundTripper: r,
 	}
 
 	// Create new client.

@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/api"
 	"github.com/prometheus/prometheus/util/testutil"
 )
 
@@ -28,14 +29,16 @@ func TestQueryRange(t *testing.T) {
 	defer s.Close()
 
 	p := &promqlPrinter{}
-	exitCode := QueryRange(s.URL, map[string]string{}, "up", "0", "300", 0, p)
+	rt := api.DefaultRoundTripper
+
+	exitCode := QueryRange(s.URL, map[string]string{}, "up", "0", "300", 0, p, rt)
 	testutil.Equals(t, "/api/v1/query_range", getRequest().URL.Path)
 	form := getRequest().Form
 	testutil.Equals(t, "up", form.Get("query"))
 	testutil.Equals(t, "1", form.Get("step"))
 	testutil.Equals(t, 0, exitCode)
 
-	exitCode = QueryRange(s.URL, map[string]string{}, "up", "0", "300", 10*time.Millisecond, p)
+	exitCode = QueryRange(s.URL, map[string]string{}, "up", "0", "300", 10*time.Millisecond, p, rt)
 	testutil.Equals(t, "/api/v1/query_range", getRequest().URL.Path)
 	form = getRequest().Form
 	testutil.Equals(t, "up", form.Get("query"))
@@ -48,7 +51,9 @@ func TestQueryInstant(t *testing.T) {
 	defer s.Close()
 
 	p := &promqlPrinter{}
-	exitCode := QueryInstant(s.URL, "up", "300", p)
+	rt := api.DefaultRoundTripper
+
+	exitCode := QueryInstant(s.URL, "up", "300", p, rt)
 	testutil.Equals(t, "/api/v1/query", getRequest().URL.Path)
 	form := getRequest().Form
 	testutil.Equals(t, "up", form.Get("query"))
